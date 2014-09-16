@@ -3,64 +3,31 @@ package main
 import (
 	"github.com/cpucycle/astrotime"
 	"github.com/wjessop/go-piglow"
+	"code.google.com/p/gcfg"
 	"time"
-	"strings"
 	"strconv"
-	"errors"
-	"unicode"
 	"math"
 	"log"
 	"io/ioutil"
 	"os"
+	"os/signal"
+	"syscall"
 	"fmt"
 	"flag"
 )
+const VERSION = "0.2.1"
 
-const HELP_HEADER = "PiGlow Ambient, version 0.1.0\n"
-const LATITUDE = float64(51.82796)
-const LONGITUDE = float64(5.86830)
-const TRANSITION_SPEED = "60m"
-const MAX_POWER = 255
-
-func getTransitionSpeed(str string) (int, error) {
-	if len(str) <= 0 {
-		return -1, errors.New("No transition time given")
-	}
-
-	speed := strings.Replace(strings.ToLower(strings.TrimSpace(str)), " ", "", -1)
-	timeType := speed[len(speed)-1:len(speed)]
-
-	if !unicode.IsLetter([]rune(timeType)[0]) {
-		timeType = "s"
-		speed += "s"
-	}
-
-	timeSpeed, e := strconv.Atoi(speed[:len(speed)-1])
-
-	if e != nil {
-		return -1, e
-	}
-
-	switch timeType {
-		case "s":
-		case "m":
-			timeSpeed *= 60
-		case "h":
-			timeSpeed *= 60 * 60
-		default:
-			return -1, fmt.Errorf("Time type `%s` given, but is not supported", timeType)
-	}
-
-	return timeSpeed, nil
-}
-
+var isRunning bool
+var isTesting bool
 var pidPath string
 var logPath string
+var cfgPath string
+var cfg Config
 
-func main() {
+func initFlags(){
 	// Adjust command line help text
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, HELP_HEADER)
+		fmt.Fprintf(os.Stderr, "PiGlow Ambient, version %s\n", VERSION)
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n  -h,--help: this help\n")
 		flag.PrintDefaults()
@@ -68,17 +35,40 @@ func main() {
 	}
 
 	// Command line arguments
+	flag.BoolVar(&isTesting, "test", false, "if enabled it tests the program and dies")
 	flag.StringVar(&pidPath, "pidfile", "", "name of the PID file")
 	flag.StringVar(&logPath, "logfile", "-", "log to a specified file, - for stdout")
+	flag.StringVar(&cfgPath, "cfgfile", "/etc/piglow-ambient.gcfg", "configuration file")
 	flag.Parse()
+}
 
-	// Write pid file
-	if pidPath != "" {
-		if err := ioutil.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
-			log.Fatalf("error creating PID file: %v", err)
+func initSignal() {
+	ChannelInterrupt := make(chan os.Signal, 1)
+	signal.Notify(ChannelInterrupt, os.Interrupt, os.Kill, syscall.SIGTERM, syscall.SIGQUIT)
+
+	go func(){
+		<- ChannelInterrupt
+		log.Printf("Goodbye!")
+		isRunning = false
+	}()
+
+	ChannelReload := make(chan os.Signal, 1)
+	signal.Notify(ChannelReload, syscall.SIGHUP)
+
+	go func(){
+		for isRunning {
+			<- ChannelReload
+			log.Printf("[TODO] We should reload config file!")
 		}
-		defer os.Remove(pidPath) // Remove when we exit
-	}
+	}()
+}
+
+
+func main() {
+	// Do initializing
+	isRunning = true
+	initFlags()
+	initSignal()
 
 	// Setup logging
 	if logPath != "-" {
@@ -90,8 +80,27 @@ func main() {
 		log.SetOutput(logFile)
 	}
 
+	if logPath != "-" {
+		log.Printf("--------------------------------------------------------")
+	}
+	log.Printf("Welcome to PiGlow Ambient version %s", VERSION)
+
+	// Write pid file
+	if pidPath != "" {
+		if err := ioutil.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+			log.Fatalf("error creating PID file: %v", err)
+		}
+		defer os.Remove(pidPath) // Remove when we exit
+	}
+
+	// Read configuration file
+	err := gcfg.ReadFileInto(&cfg, cfgPath)
+	if err != nil {
+		log.Fatalf("Failed to parse gcfg data: %s", err)
+	}
+
 	// Initialize transition speed
-	transitionTime, err := getTransitionSpeed(TRANSITION_SPEED)
+	transitionTime, err := getTransitionSpeed(cfg.Settings.TransitionSpeed)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,8 +114,8 @@ func main() {
 	if sleepDuration > time.Second {
 		sleepDuration = time.Second
 	}
-	fadeInTime := astrotime.NextSunset(time.Now(), LATITUDE, LONGITUDE).Add(-transitionDuration/2)
-	fadeOutTime := astrotime.NextSunrise(time.Now(), LATITUDE, LONGITUDE).Add(-transitionDuration/2)
+	fadeInTime := astrotime.NextSunset(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
+	fadeOutTime := astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
 
 	// Setup PiGlow
 	p, err := piglow.NewPiglow()
@@ -119,12 +128,19 @@ func main() {
 	}
 
 	// Announce some basic information
-	log.Printf("Transition time in seconds: %d, Sleep duration: %f", transitionTime, sleepDuration.Seconds())
+	log.Printf("Transition time in seconds: %d, Sleep duration: %.04f", transitionTime, sleepDuration.Seconds())
+	log.Printf("Latitude: %f, Longitude: %f", cfg.Settings.Latitude, cfg.Settings.Longitude)
 	log.Printf("The next fadeIn  is %02d:%02d:%02d on %d/%d/%d", fadeInTime.Hour(), fadeInTime.Minute(), fadeInTime.Second(), fadeInTime.Month(), fadeInTime.Day(), fadeInTime.Year())
 	log.Printf("The next fadeOut is %02d:%02d:%02d on %d/%d/%d", fadeOutTime.Hour(), fadeOutTime.Minute(), fadeOutTime.Second(), fadeOutTime.Month(), fadeOutTime.Day(), fadeOutTime.Year())
 
+	// isTesting
+	if isTesting {
+		os.Exit(0)
+	}
+
+	// Main loop
 	var power int
-	for {
+	for isRunning {
 		// FadeIn
 		if elapsed := time.Now().Sub(fadeInTime); elapsed > 0 {
 			// Calculate brightness with maximum of 255
@@ -138,7 +154,7 @@ func main() {
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power >= 255 {
-				fadeInTime = astrotime.NextSunset(time.Now(), LATITUDE, LONGITUDE).Add(-transitionDuration/2)
+				fadeInTime = astrotime.NextSunset(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
 				log.Printf("The next fadeIn  is %02d:%02d:%02d on %d/%d/%d", fadeInTime.Hour(), fadeInTime.Minute(), fadeInTime.Second(), fadeInTime.Month(), fadeInTime.Day(), fadeInTime.Year())
 			}
 		}
@@ -159,7 +175,7 @@ func main() {
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power <= 0 {
-				fadeOutTime = astrotime.NextSunrise(time.Now(), LATITUDE, LONGITUDE).Add(-transitionDuration/2)
+				fadeOutTime = astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
 				log.Printf("The next fadeOut is %02d:%02d:%02d on %d/%d/%d", fadeOutTime.Hour(), fadeOutTime.Minute(), fadeOutTime.Second(), fadeOutTime.Month(), fadeOutTime.Day(), fadeOutTime.Year())
 			}
 		}

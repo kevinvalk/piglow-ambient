@@ -13,12 +13,12 @@
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
 PATH=/usr/local/bin:$PATH
-DESC="Background lighting for when it gets dark"
 NAME=piglow-ambient
-DAEMON=/usr/local/bin/$NAME
-DAEMON_ARGS="--logfile=/var/log/piglow-ambient.log"
+DESC="Background lighting for when it gets dark"
 PIDFILE=/var/run/$NAME.pid
 SCRIPTNAME=/etc/init.d/$NAME
+DAEMON=/usr/local/bin/$NAME
+DAEMON_ARGS="--logfile=/var/log/$NAME.log --pidfile=$PIDFILE"
 
 # Exit if the package is not installed
 [ -x "$DAEMON" ] || exit 0
@@ -112,11 +112,12 @@ case "$1" in
   status)
 		status_of_proc "$DAEMON" "$NAME" && exit 0 || exit $?
 		;;
-  restart|force-reload)
-		#
-		# If the "reload" option is implemented then remove the
-		# 'force-reload' alias
-		#
+  reload|force-reload)
+		log_daemon_msg "Reloading $DESC" "$NAME"
+		do_reload
+		log_end_msg $?
+		;;
+  restart)
 		log_daemon_msg "Restarting $DESC" "$NAME"
 		do_stop
 		case "$?" in
@@ -135,7 +136,7 @@ case "$1" in
 		esac
 		;;
   *)
-		echo "Usage: $SCRIPTNAME {start|stop|status|restart|force-reload}" >&2
+		echo "Usage: $SCRIPTNAME {start|stop|status|restart|reload}" >&2
 		exit 3
 		;;
 esac
