@@ -7,13 +7,11 @@ With this simple program written in Go you can have an awesome ambient light whe
 Just build it with Go and if you are using a debian based installation you can use the include debian.sh for init script. Just copy debian.sh to /etc/init.d/piglow-ambient and the go binary to /usr/local/bin/piglow-ambient.
 
 ## TODO
-- Config file (/etc/piglow-ambient) in JSON or custom
-- Geolocation, so perhaps make it possible to just configure your address in config
-- SIGTERM for correctly stopping
 - SIGHUP for reloading config file
-- It currently runs the whole night perhaps you want motion detection or something?
-- Web interface for configuration and control so you can enable or disable from other computers??
-- Ping checking if other computer(s) are on if not stop the ambient lighting
+- On startup check if we should have ambient lightning on, off or if we are in transition
+- Ping checking if other computer(s) are on, if not stop the ambient lighting
+- Auto update using github
+- Correct installing (location, default config file, insserv, etc)
 
 ## About me
 Author: Kevin Valk <kevin@kevinvalk.nl> 
