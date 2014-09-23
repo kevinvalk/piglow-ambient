@@ -19,6 +19,12 @@ type Config struct {
 	}
 }
 
+const (
+	PingUnknown = iota
+	PingUp
+	PingDown
+)
+
 func getTransitionSpeed(str string) (int, error) {
 	if len(str) <= 0 {
 		return -1, errors.New("No transition time given")

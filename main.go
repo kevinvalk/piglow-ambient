@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/cpucycle/astrotime"
 	"github.com/wjessop/go-piglow"
+	"github.com/tatsushid/go-fastping"
 	"code.google.com/p/gcfg"
 	"time"
 	"strconv"
@@ -12,11 +13,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"net"
 	"fmt"
 	"flag"
 )
+
 const VERSION = "0.2.1"
 
+var glow *piglow.Piglow
+var isPaused bool
 var isRunning bool
 var isTesting bool
 var pidPath string
@@ -63,12 +68,83 @@ func initSignal() {
 	}()
 }
 
+func initPing() {
+	lastState := PingUnknown
+	p := fastping.NewPinger()
+	ra, err := net.ResolveIPAddr("ip4:icmp", cfg.Settings.PingIp)
+	if err != nil {
+		log.Fatalf("error resolving IP address: %v", err)
+	}
+	p.AddIPAddr(ra)
+	err = p.AddHandler("receive", func(addr *net.IPAddr, rtt time.Duration) {
+		if lastState == PingDown {
+			log.Printf("Remote %s came up, RTT: %v", addr.String(), rtt)
+			resume()
+		}
+		lastState = PingUp
+	})
+	if err != nil {
+		log.Fatalf("error adding receive handler: %v", err)
+	}
+	err = p.AddHandler("idle", func() {
+		if lastState == PingUp {
+			log.Printf("Remote %s went down", cfg.Settings.PingIp)
+			pause()
+		}
+		lastState = PingDown
+	})
+	if err != nil {
+		log.Fatalf("error adding idle handler: %v", err)
+	}
+
+	// Ping loop
+	go func(){
+		for isRunning {
+			err = p.Run()
+			if err != nil {
+				log.Fatalf("error while pinging: %v", err)
+			}
+			time.Sleep(time.Minute) // Check every minute for host
+		}
+	}()
+}
+
+func pause() {
+	isPaused = true
+
+	// Do quick fade out
+	time.Sleep(time.Second)
+	for i := 255; i >= 0; i-- {
+		setGlow(i)
+		time.Sleep(time.Millisecond * 35) // 9 seconds
+	}
+}
+
+func resume() {
+	isPaused = false
+
+	// Do quick fade out
+	time.Sleep(time.Second)
+	for i := 0; i <= 255; i++ {
+		setGlow(i)
+		time.Sleep(time.Millisecond * 35) // 9 seconds
+	}
+}
+
+func setGlow(power int) {
+	glow.SetAll(uint8(power))
+	if err := glow.Apply(); err != nil {
+		log.Fatal("Could not set PiGlow: ", err)
+	}
+}
 
 func main() {
 	// Do initializing
 	isRunning = true
+	isPaused = false
 	initFlags()
 	initSignal()
+	initPing()
 
 	// Setup logging
 	if logPath != "-" {
@@ -118,14 +194,11 @@ func main() {
 	fadeOutTime := astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
 
 	// Setup PiGlow
-	p, err := piglow.NewPiglow()
+	glow, err = piglow.NewPiglow()
 	if err != nil {
 		log.Fatal("Could not create a PiGlow object: ", err)
 	}
-	p.SetAll(0)
-	if err = p.Apply(); err != nil {
-		log.Fatal("Could not set PiGlow: ", err)
-	}
+	setGlow(0)
 
 	// Announce some basic information
 	log.Printf("Transition time in seconds: %d, Sleep duration: %.04f", transitionTime, sleepDuration.Seconds())
@@ -141,16 +214,21 @@ func main() {
 	// Main loop
 	var power int
 	for isRunning {
+		// Sleep
+		time.Sleep(sleepDuration)
+
+		// Check if we are sleeping
+		if isPaused {
+			continue
+		}
+
 		// FadeIn
 		if elapsed := time.Now().Sub(fadeInTime); elapsed > 0 {
 			// Calculate brightness with maximum of 255
 			power = int(math.Ceil((MAX_POWER/float64(transitionTime))*elapsed.Seconds())) % 256
 
 			// Set the new brightness
-			p.SetAll(uint8(power))
-			if err = p.Apply(); err != nil {
-				log.Fatal("Could not set PiGlow: ", err)
-			}
+			setGlow(power)
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power >= 255 {
@@ -168,10 +246,7 @@ func main() {
 			}
 
 			// Set the new brightness
-			p.SetAll(uint8(power))
-			if err = p.Apply(); err != nil {
-				log.Fatal("Could not set PiGlow: ", err)
-			}
+			setGlow(power)
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power <= 0 {
@@ -179,8 +254,5 @@ func main() {
 				log.Printf("The next fadeOut is %02d:%02d:%02d on %d/%d/%d", fadeOutTime.Hour(), fadeOutTime.Minute(), fadeOutTime.Second(), fadeOutTime.Month(), fadeOutTime.Day(), fadeOutTime.Year())
 			}
 		}
-
-		// Sleep
-		time.Sleep(sleepDuration)
 	}
 }
