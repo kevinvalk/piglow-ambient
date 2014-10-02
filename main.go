@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/cpucycle/astrotime"
+	"github.com/kevinvalk/astrotime"
 	"github.com/wjessop/go-piglow"
 	"github.com/tatsushid/go-fastping"
 	"code.google.com/p/gcfg"
@@ -18,16 +18,16 @@ import (
 	"flag"
 )
 
-const VERSION = "0.2.1"
+const VERSION = "0.3.0"
 
 var glow *piglow.Piglow
 var isPaused bool
 var isRunning bool
-var isTesting bool
 var pidPath string
 var logPath string
 var cfgPath string
 var cfg Config
+var currentPower int
 
 func initFlags(){
 	// Adjust command line help text
@@ -40,7 +40,6 @@ func initFlags(){
 	}
 
 	// Command line arguments
-	flag.BoolVar(&isTesting, "test", false, "if enabled it tests the program and dies")
 	flag.StringVar(&pidPath, "pidfile", "", "name of the PID file")
 	flag.StringVar(&logPath, "logfile", "-", "log to a specified file, - for stdout")
 	flag.StringVar(&cfgPath, "cfgfile", "/etc/piglow-ambient.gcfg", "configuration file")
@@ -63,20 +62,41 @@ func initSignal() {
 	go func(){
 		for isRunning {
 			<- ChannelReload
-			log.Printf("[TODO] We should reload config file!")
+			log.Printf("Partially reloading config (only lat/long)...")
+			initConfig()
 		}
 	}()
 }
 
+func initConfig() {
+	err := gcfg.ReadFileInto(&cfg, cfgPath)
+	if err != nil {
+		log.Fatalf("Failed to parse gcfg data: %s", err)
+	}
+}
+
 func initPing() {
+	// Default state
 	lastState := PingUnknown
+	var isRecv bool
+
+	// Resolve host
 	p := fastping.NewPinger()
 	ra, err := net.ResolveIPAddr("ip4:icmp", cfg.Settings.PingIp)
 	if err != nil {
 		log.Fatalf("error resolving IP address: %v", err)
 	}
+
+	// Disabling this feature if no IP given
+	if ra.IP == nil {
+		log.Printf("No ping IP given (%s) (or resolved), disabling ping check ...", cfg.Settings.PingIp)
+		return
+	}
+
+	// Add IP and add the receive handler
 	p.AddIPAddr(ra)
 	err = p.AddHandler("receive", func(addr *net.IPAddr, rtt time.Duration) {
+		isRecv = true
 		if lastState == PingDown {
 			log.Printf("Remote %s came up, RTT: %v", addr.String(), rtt)
 			resume()
@@ -86,8 +106,13 @@ func initPing() {
 	if err != nil {
 		log.Fatalf("error adding receive handler: %v", err)
 	}
+
+	// Add the idle handler, this get called always so we have to check if we received something in the receive (isRecv flag)
 	err = p.AddHandler("idle", func() {
-		if lastState == PingUp {
+		if isRecv {
+			return
+		}
+		if lastState == PingUp || lastState == PingUnknown {
 			log.Printf("Remote %s went down", cfg.Settings.PingIp)
 			pause()
 		}
@@ -100,6 +125,7 @@ func initPing() {
 	// Ping loop
 	go func(){
 		for isRunning {
+			isRecv = false
 			err = p.Run()
 			if err != nil {
 				log.Fatalf("error while pinging: %v", err)
@@ -114,7 +140,7 @@ func pause() {
 
 	// Do quick fade out
 	time.Sleep(time.Second)
-	for i := 255; i >= 0; i-- {
+	for i := currentPower; i >= 0; i-- {
 		setGlow(i)
 		time.Sleep(time.Millisecond * 35) // 9 seconds
 	}
@@ -125,7 +151,7 @@ func resume() {
 
 	// Do quick fade out
 	time.Sleep(time.Second)
-	for i := 0; i <= 255; i++ {
+	for i := currentPower; i <= 255; i++ {
 		setGlow(i)
 		time.Sleep(time.Millisecond * 35) // 9 seconds
 	}
@@ -133,6 +159,7 @@ func resume() {
 
 func setGlow(power int) {
 	glow.SetAll(uint8(power))
+	currentPower = power
 	if err := glow.Apply(); err != nil {
 		log.Fatal("Could not set PiGlow: ", err)
 	}
@@ -144,7 +171,6 @@ func main() {
 	isPaused = false
 	initFlags()
 	initSignal()
-	initPing()
 
 	// Setup logging
 	if logPath != "-" {
@@ -170,10 +196,7 @@ func main() {
 	}
 
 	// Read configuration file
-	err := gcfg.ReadFileInto(&cfg, cfgPath)
-	if err != nil {
-		log.Fatalf("Failed to parse gcfg data: %s", err)
-	}
+	initConfig()
 
 	// Initialize transition speed
 	transitionTime, err := getTransitionSpeed(cfg.Settings.TransitionSpeed)
@@ -190,8 +213,14 @@ func main() {
 	if sleepDuration > time.Second {
 		sleepDuration = time.Second
 	}
-	fadeInTime := astrotime.NextSunset(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
-	fadeOutTime := astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
+
+	// Calculate sunset/sunrise, I am using this so that no matter when you start this program it will always have to correct sunrise/sunset
+	sunrise := astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, cfg.Settings.Longitude)
+	sunset := astrotime.PreviousSunset(sunrise, cfg.Settings.Latitude, cfg.Settings.Longitude)
+
+	// Calculate the fade times
+	fadeOutTime := sunrise.Add(-transitionDuration/2)
+	fadeInTime := sunset.Add(-transitionDuration/2)
 
 	// Setup PiGlow
 	glow, err = piglow.NewPiglow()
@@ -206,10 +235,8 @@ func main() {
 	log.Printf("The next fadeIn  is %02d:%02d:%02d on %d/%d/%d", fadeInTime.Hour(), fadeInTime.Minute(), fadeInTime.Second(), fadeInTime.Month(), fadeInTime.Day(), fadeInTime.Year())
 	log.Printf("The next fadeOut is %02d:%02d:%02d on %d/%d/%d", fadeOutTime.Hour(), fadeOutTime.Minute(), fadeOutTime.Second(), fadeOutTime.Month(), fadeOutTime.Day(), fadeOutTime.Year())
 
-	// isTesting
-	if isTesting {
-		os.Exit(0)
-	}
+	// Initialize pings checks just before main loop (to let the program boot)
+	initPing()
 
 	// Main loop
 	var power int
@@ -225,14 +252,17 @@ func main() {
 		// FadeIn
 		if elapsed := time.Now().Sub(fadeInTime); elapsed > 0 {
 			// Calculate brightness with maximum of 255
-			power = int(math.Ceil((MAX_POWER/float64(transitionTime))*elapsed.Seconds())) % 256
+			power = int(math.Ceil((MAX_POWER/float64(transitionTime))*elapsed.Seconds()))
+			if power > 255 {
+				power = 255
+			}
 
 			// Set the new brightness
 			setGlow(power)
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power >= 255 {
-				fadeInTime = astrotime.NextSunset(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
+				fadeInTime = astrotime.NextSunset(time.Now(), cfg.Settings.Latitude, cfg.Settings.Longitude).Add(-transitionDuration/2)
 				log.Printf("The next fadeIn  is %02d:%02d:%02d on %d/%d/%d", fadeInTime.Hour(), fadeInTime.Minute(), fadeInTime.Second(), fadeInTime.Month(), fadeInTime.Day(), fadeInTime.Year())
 			}
 		}
@@ -250,7 +280,7 @@ func main() {
 
 			// If we have complete our fadeIn calculate next fadeIn
 			if power <= 0 {
-				fadeOutTime = astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, -cfg.Settings.Longitude).Add(-transitionDuration/2)
+				fadeOutTime = astrotime.NextSunrise(time.Now(), cfg.Settings.Latitude, cfg.Settings.Longitude).Add(-transitionDuration/2)
 				log.Printf("The next fadeOut is %02d:%02d:%02d on %d/%d/%d", fadeOutTime.Hour(), fadeOutTime.Minute(), fadeOutTime.Second(), fadeOutTime.Month(), fadeOutTime.Day(), fadeOutTime.Year())
 			}
 		}

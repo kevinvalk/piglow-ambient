@@ -4,14 +4,14 @@ With this simple program written in Go you can have an awesome ambient light whe
 **Please let me know by email or issues or whatever if you are using this and want features!!!**
 
 ## Installation
-Just build it with Go and if you are using a debian based installation you can use the include debian.sh for init script. Just copy debian.sh to /etc/init.d/piglow-ambient and the go binary to /usr/local/bin/piglow-ambient.
+For easy installation see the wiki page [Installation](https://github.com/kevinvalk/piglow-ambient/wiki/Installation)
 
 ## TODO
-- SIGHUP for reloading config file
-- On startup check if we should have ambient lightning on, off or if we are in transition
-- Ping checking if other computer(s) are on, if not stop the ambient lighting
-- Auto update using github
-- Correct installing (location, default config file, insserv, etc)
+- [ ] SIGHUP for reloading config file
+- [X] On startup check if we should have ambient lightning on, off or if we are in transition
+- [X] Ping checking if other computer(s) are on, if not stop the ambient lighting
+- [ ] Auto update using github
+- [ ] Correct installing (auto) (location, default config file, insserv, etc)
 
 ## About me
 Author: Kevin Valk <kevin@kevinvalk.nl> 
